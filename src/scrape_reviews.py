@@ -6,7 +6,7 @@ import random
 import logging
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
-
+import re
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -15,7 +15,7 @@ from .models import Branch, Review
 
 # Config via env
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-MAX_REVIEWS_PER_BRANCH = int(os.getenv("MAX_REVIEWS_PER_BRANCH", "50"))
+MAX_REVIEWS_PER_BRANCH = int(os.getenv("MAX_REVIEWS_PER_BRANCH", "20"))
 HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() in ("1", "true", "yes")
 PLAYWRIGHT_PROXY = os.getenv("PLAYWRIGHT_PROXY")  # optional, format: "http://user:pass@host:port"
 BRANCHES_JSON = os.getenv("BRANCHES_JSON", "branches.json")
@@ -41,59 +41,86 @@ def _is_captcha_page(html):
 
 def _extract_reviews_from_html(html):
     """
-    Heuristic extraction: looks for nodes that contain both rating text ("Rated X") and sizeable text content.
+    Improved extraction for Google Maps review blocks using updated selectors.
     Returns list of dicts: {author, rating, text, review_date}
     """
+    # Helper function parse_rating_from_text remains the same
+    def parse_rating_from_text(s):
+        # ... (keep your existing parse_rating_from_text logic here) ...
+        if not s:
+            return None
+        import re # Keep this here since re is needed
+        arabic_map = {'٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9'}
+        norm = ''.join(arabic_map.get(ch, ch) for ch in s)
+        m = re.search(r"Rated\s*[:\-]?\s*([0-9])", norm)
+        if m:
+            try: return int(m.group(1))
+            except ValueError: return None
+        m = re.search(r"([0-9])\s*out\s*of\s*[0-9]", norm)
+        if m:
+            try: return int(m.group(1))
+            except ValueError: return None
+        m = re.search(r"\b([0-9])(\.0)?\b", norm)
+        if m:
+            try: return int(m.group(1))
+            except ValueError: return None
+        return None
+    # End of helper function
+
     soup = BeautifulSoup(html, "html.parser")
     reviews = []
 
-    # Primary: search for elements whose aria-label mentions "Rated X" (common in Google Maps)
-    candidates = soup.find_all(lambda tag: tag.name in ("div", "span") and tag.get("aria-label") and "Rated" in tag.get("aria-label"))
-    # fallback: find long text blocks that look like reviews
-    if not candidates:
-        candidates = soup.find_all("div", string=lambda t: t and len(t.strip()) > 60)
+    # PRIMARY FIX: Use the data-review-id attribute for the main block
+    blocks = soup.find_all("div", attrs={"data-review-id": True})
 
     seen_texts = set()
-    for c in candidates:
-        text = c.get_text(separator=" ", strip=True)
-        if not text or len(text) < 20:
-            continue
-        # try to parse rating
-        aria = (c.get("aria-label") or "")
-        rating = None
-        m = None
+    for b in blocks:
         try:
-            import re
-            m = re.search(r"Rated\s+([0-5])", aria)
-            if m:
-                rating = int(m.group(1))
-        except Exception:
+            # --- FIX 1: Author Extraction ---
+            author = "Unknown"
+            author_tag = b.find("div", class_="d4r55 fontTitleMedium")
+            if author_tag:
+                author = author_tag.get_text(strip=True)
+
+            # --- FIX 2: Rating Extraction ---
             rating = None
+            # The rating is in a span with role="img" and an aria-label
+            rating_tag = b.find("span", role="img")
+            if rating_tag:
+                rating = parse_rating_from_text(rating_tag.get("aria-label"))
 
-        # attempt author/date: find nearest preceding element that looks like an author
-        author = "Unknown"
-        review_date = ""
-        prev = c.find_previous(lambda tag: tag.name in ("span", "div") and len(tag.get_text(strip=True)) < 40 and len(tag.get_text(strip=True)) > 0)
-        if prev:
-            atext = prev.get_text(strip=True)
-            if any(ch.isalpha() for ch in atext):
-                author = atext
+            # --- Text Extraction (can be simplified/retained as is) ---
+            # Targeting the text container: div.MyEned
+            text_container = b.find("div", class_="MyEned")
+            if text_container:
+                 text = text_container.get_text(separator=" ", strip=True)
+            else:
+                 # Fallback (your original heuristic)
+                 text = b.get_text(separator=" ", strip=True) or ""
 
-        # dedupe by a snippet of text
-        snippet = text[:160]
-        if snippet in seen_texts:
+
+            # ignore very short or empty texts
+            if not text or len(text) < 10:
+                continue
+
+            # dedupe by snippet
+            snippet = text[:160]
+            if snippet in seen_texts:
+                continue
+            seen_texts.add(snippet)
+
+            reviews.append({
+                "author": author,
+                "rating": rating or 0,
+                "text": text,
+                "review_date": ""  # Still requires separate date extraction logic
+            })
+
+            if len(reviews) >= MAX_REVIEWS_PER_BRANCH:
+                break
+        except Exception:
+            # avoid full failure when a single block is weird
             continue
-        seen_texts.add(snippet)
-
-        reviews.append({
-            "author": author,
-            "rating": rating or 0,
-            "text": text,
-            "review_date": review_date
-        })
-
-        if len(reviews) >= MAX_REVIEWS_PER_BRANCH:
-            break
 
     return reviews
 
@@ -159,12 +186,10 @@ def scrape_reviews_from_place_urls(place_list):
             viewport={"width": 1280, "height": 900},
             locale="en-US,ar-SA"
         )
-        # allow both English and Arabic reviews
         context.set_extra_http_headers({
-            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+            "Accept-Language": "en-US,ar-SA;q=0.9,en;q=0.8",
             "Referer": "https://www.google.com/"
         })
-
 
         page = context.new_page()
 
@@ -174,7 +199,6 @@ def scrape_reviews_from_place_urls(place_list):
             logger.info("Processing branch: %s -> %s", name, url)
             try:
                 page.goto(url, timeout=60000)
-                # wait a bit for dynamic content
                 page.wait_for_timeout(2500 + random.randint(0, 2000))
 
                 html = page.content()
@@ -183,70 +207,111 @@ def scrape_reviews_from_place_urls(place_list):
                     results.append({"name": name, "url": url, "skipped": True, "reason": "captcha"})
                     continue
 
-                # Try to click "All reviews" or open review panel.
-                # Common patterns: button with aria-label containing "reviews" or text "All reviews"
+                # Try to click "All reviews"
                 try:
-                    # try several selectors until one succeeds
                     review_button_selectors = [
+                        # Updated selectors based on recent Google Maps changes
                         "button[aria-label*='reviews']",
                         "button[jsaction*='pane.review']",
                         "button:has-text('All reviews')",
-                        "a[href*='#reviews']"
+                        "button:has-text('Reviews')" # A common simplified label
                     ]
                     clicked = False
+                    
                     for sel in review_button_selectors:
                         try:
-                            btns = page.query_selector_all(sel)
-                            if btns:
-                                btns[0].click(timeout=3000)
-                                clicked = True
-                                break
-                        except PlaywrightTimeoutError:
+                            # Use page.click for better reliability and wait time
+                            page.click(sel, timeout=5000) 
+                            clicked = True
+                            logger.info("Successfully clicked review button using selector: %s", sel)
+                            # Wait for a review element to appear to confirm the panel is open
+                            page.wait_for_selector('div[data-review-id]', timeout=5000) 
+                            page.wait_for_timeout(1500 + random.randint(0, 1500))
+                            break
+                        except Exception:
                             continue
-                    if clicked:
-                        page.wait_for_timeout(1500 + random.randint(0, 1500))
-                except Exception:
-                    # ignore - maybe reviews are already visible
+                            
+                    if not clicked:
+                        logger.warning("Could not click any 'All reviews' button for %s. Attempting to scroll anyway.", name)
+                        # Continue without clicking, hoping the reviews are already visible/loaded
+                        
+                except Exception as e:
+                    logger.warning("Error during review button click for %s: %s", name, e)
                     pass
 
-                # Scroll the reviews panel to load more items.
-                # We'll attempt to find the review container and scroll it multiple times.
+                # --- SCROLL REVIEWS PANEL (FULLY UNTIL END) ---
                 try:
-                    # heuristics: there is often a scrollable div with role="region" that contains reviews
-                    review_scrolled = False
-                    for _ in range(6):
-                        # run page.evaluate to scroll the main element that holds reviews
+                    logger.info("Scrolling reviews panel for %s", name)
+
+                    previous_height = 0
+                    stagnant_loops = 0
+                    max_stagnant_loops = 6  # stop after 6 loops with no growth
+
+                    review_selector = 'div[data-review-id]'
+
+                    while stagnant_loops < max_stagnant_loops:
+
+                        # --- ADDED: Check the current number of loaded reviews ---
+                        current_review_count = page.evaluate(f'document.querySelectorAll("{review_selector}").length')
+                        if current_review_count >= MAX_REVIEWS_PER_BRANCH:
+                            logger.info("Loaded %d reviews (target %d) for %s. Stopping scroll.", current_review_count, MAX_REVIEWS_PER_BRANCH, name)
+                            break # Exit the scrolling loop
+                        
+                        
+                        # scroll the review container
                         page.evaluate(
                             """() => {
-                                const sel = document.querySelector('div[role=\"main\"]') || document.querySelector('#pane');
-                                if (sel) {
-                                    sel.scrollBy(0, 1000);
-                                } else {
-                                    window.scrollBy(0, 1000);
-                                }
+                                const el = document.querySelector('div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde')
+                                    || document.querySelector('div.section-scrollbox')
+                                    || document.querySelector('div[role="region"]')
+                                    || document.querySelector('#pane');
+                                if (el) el.scrollBy(0, el.scrollHeight);
+                                else window.scrollBy(0, 1000);
                             }"""
                         )
-                        page.wait_for_timeout(900 + random.randint(0, 800))
-                        review_scrolled = True
-                    if not review_scrolled:
-                        page.wait_for_timeout(2000)
-                except Exception:
-                    page.wait_for_timeout(2000)
 
-                # get HTML after scrolling
+                        # wait for reviews to load
+                        page.wait_for_timeout(2000 + random.randint(0, 1000))
+
+                        # get current height of the container
+                        current_height = page.evaluate(
+                            """() => {
+                                const el = document.querySelector('div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde')
+                                    || document.querySelector('div.section-scrollbox')
+                                    || document.querySelector('div[role="region"]')
+                                    || document.querySelector('#pane');
+                                return el ? el.scrollHeight : document.body.scrollHeight;
+                            }"""
+                        )
+
+                        # if no growth detected, increment stagnant loop count
+                        if current_height == previous_height:
+                            stagnant_loops += 1
+                        else:
+                            stagnant_loops = 0
+                            previous_height = current_height
+
+                    # Expand any "More" buttons to show full text
+                    page.evaluate("""() => {
+                        document.querySelectorAll('button[jsaction*="pane.review.expandReview"]').forEach(btn => btn.click());
+                    }""")
+                    page.wait_for_timeout(1500)
+
+                    logger.info("Finished scrolling all reviews for %s", name)
+                except Exception as e:
+                    logger.warning("Scrolling failed for %s: %s", name, e)
+
                 html = page.content()
                 if _is_captcha_page(html):
                     logger.warning("CAPTCHA detected after scrolling for %s — skipping", url)
                     results.append({"name": name, "url": url, "skipped": True, "reason": "captcha_after_scroll"})
                     continue
 
-                # parse reviews
                 reviews = _extract_reviews_from_html(html)
                 logger.info("Found %d reviews (heuristic) for %s", len(reviews), name)
-                # save to DB
                 _upsert_branch_and_reviews(name, url, reviews)
                 results.append({"name": name, "url": url, "skipped": False, "found": len(reviews)})
-                # polite random delay between branches
+
                 time.sleep(3 + random.random() * 4)
             except PlaywrightTimeoutError as e:
                 logger.exception("Timeout while loading %s: %s", url, e)
