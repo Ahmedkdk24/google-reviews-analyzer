@@ -2,6 +2,12 @@ import psycopg2
 import pandas as pd
 from langdetect import detect
 from google.cloud import translate_v2 as translate
+from dotenv import load_dotenv
+import os
+
+# Load .env file
+load_dotenv()
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gym-agent-service-account-key.json"
 
 # -----------------------------
 # 1. PostgreSQL connection setup

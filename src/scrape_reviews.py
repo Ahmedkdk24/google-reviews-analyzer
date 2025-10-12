@@ -15,7 +15,7 @@ from .models import Branch, Review
 
 # Config via env
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-MAX_REVIEWS_PER_BRANCH = int(os.getenv("MAX_REVIEWS_PER_BRANCH", "20"))
+MAX_REVIEWS_PER_BRANCH = int(os.getenv("MAX_REVIEWS_PER_BRANCH", "50"))
 HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() in ("1", "true", "yes")
 PLAYWRIGHT_PROXY = os.getenv("PLAYWRIGHT_PROXY")  # optional, format: "http://user:pass@host:port"
 BRANCHES_JSON = os.getenv("BRANCHES_JSON", "branches.json")
@@ -184,10 +184,10 @@ def scrape_reviews_from_place_urls(place_list):
         context = browser.new_context(
             **ctx_opts,
             viewport={"width": 1280, "height": 900},
-            locale="en-US,ar-SA"
+            locale="en-US, ar-SA"
         )
         context.set_extra_http_headers({
-            "Accept-Language": "en-US,ar-SA;q=0.9,en;q=0.8",
+            "Accept-Language": "en-US, ar-SA;q=0.9,en;q=0.8",
             "Referer": "https://www.google.com/"
         })
 
@@ -239,80 +239,136 @@ def scrape_reviews_from_place_urls(place_list):
                     logger.warning("Error during review button click for %s: %s", name, e)
                     pass
 
-                # --- SCROLL REVIEWS PANEL (FULLY UNTIL END) ---
+                # --- SCROLL REVIEWS PANEL (FULLY UNTIL END) -
+                    # --- CREATE A FRESH PAGE PER BRANCH ---
+                page = context.new_page()
+                page.goto(url, timeout=60000)
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(3000 + random.randint(0, 2000))
+
+                html = page.content()
+                if _is_captcha_page(html):
+                    logger.warning("CAPTCHA / unusual traffic detected for %s — skipping", url)
+                    results.append({"name": name, "url": url, "skipped": True, "reason": "captcha"})
+                    page.close()
+                    continue
+
+                # --- CLICK "ALL REVIEWS" BUTTON ---
+                try:
+                    review_button_selectors = [
+                        "button[aria-label*='reviews']",
+                        "button[jsaction*='pane.review']",
+                        "button:has-text('All reviews')",
+                        "button:has-text('Reviews')"
+                    ]
+                    clicked = False
+                    for sel in review_button_selectors:
+                        try:
+                            page.click(sel, timeout=5000)
+                            clicked = True
+                            logger.info("Clicked review button using selector: %s", sel)
+                            page.wait_for_selector('div[data-review-id]', timeout=8000)
+                            break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        logger.warning("Could not click any 'All reviews' button for %s", name)
+                except Exception as e:
+                    logger.warning("Error clicking review button for %s: %s", name, e)
+
+                # --- SCROLL + EXPAND LOOP ---
                 try:
                     logger.info("Scrolling reviews panel for %s", name)
 
                     previous_height = 0
                     stagnant_loops = 0
-                    max_stagnant_loops = 6  # stop after 6 loops with no growth
+                    max_stagnant_loops = 15  # allow more scroll cycles for slow loading
 
                     review_selector = 'div[data-review-id]'
+                    scroll_script = """
+                        () => {
+                            const el = document.querySelector('div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde')
+                                || document.querySelector('div.section-scrollbox')
+                                || document.querySelector('div[role="region"]')
+                                || document.querySelector('#pane');
+                            if (el) el.scrollBy(0, el.scrollHeight);
+                            else window.scrollBy(0, 1000);
+                        }
+                    """
 
                     while stagnant_loops < max_stagnant_loops:
-
-                        # --- ADDED: Check the current number of loaded reviews ---
                         current_review_count = page.evaluate(f'document.querySelectorAll("{review_selector}").length')
-                        if current_review_count >= MAX_REVIEWS_PER_BRANCH:
-                            logger.info("Loaded %d reviews (target %d) for %s. Stopping scroll.", current_review_count, MAX_REVIEWS_PER_BRANCH, name)
-                            break # Exit the scrolling loop
-                        
-                        
-                        # scroll the review container
-                        page.evaluate(
-                            """() => {
-                                const el = document.querySelector('div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde')
-                                    || document.querySelector('div.section-scrollbox')
-                                    || document.querySelector('div[role="region"]')
-                                    || document.querySelector('#pane');
-                                if (el) el.scrollBy(0, el.scrollHeight);
-                                else window.scrollBy(0, 1000);
-                            }"""
-                        )
 
-                        # wait for reviews to load
+                        if current_review_count >= MAX_REVIEWS_PER_BRANCH:
+                            logger.info(f"Loaded {current_review_count} reviews (target {MAX_REVIEWS_PER_BRANCH}) for {name}. Stopping scroll.")
+                            break
+
+                        # Scroll the container
+                        page.evaluate(scroll_script)
                         page.wait_for_timeout(2000 + random.randint(0, 1000))
 
-                        # get current height of the container
-                        current_height = page.evaluate(
-                            """() => {
+                        # Expand "More" / "المزيد" every few loops
+                        if stagnant_loops % 3 == 0:
+                            try:
+                                buttons = page.query_selector_all("button, span")
+                                expanded = 0
+                                for btn in buttons:
+                                    try:
+                                        text = (btn.inner_text() or "").strip()
+                                        if text in ("More", "المزيد") or "expandReview" in (btn.get_attribute("jsaction") or ""):
+                                            btn.scroll_into_view_if_needed()
+                                            btn.click(timeout=800)
+                                            expanded += 1
+                                    except Exception:
+                                        continue
+                                if expanded:
+                                    logger.info("Expanded %d 'More' buttons for %s", expanded, name)
+                            except Exception:
+                                pass
+
+                        # Measure growth of scroll height
+                        current_height = page.evaluate("""
+                            () => {
                                 const el = document.querySelector('div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde')
                                     || document.querySelector('div.section-scrollbox')
                                     || document.querySelector('div[role="region"]')
                                     || document.querySelector('#pane');
                                 return el ? el.scrollHeight : document.body.scrollHeight;
-                            }"""
-                        )
+                            }
+                        """)
 
-                        # if no growth detected, increment stagnant loop count
                         if current_height == previous_height:
                             stagnant_loops += 1
                         else:
                             stagnant_loops = 0
                             previous_height = current_height
 
-                    # Expand any "More" buttons to show full text
-                    page.evaluate("""() => {
-                        document.querySelectorAll('button[jsaction*="pane.review.expandReview"]').forEach(btn => btn.click());
-                    }""")
-                    page.wait_for_timeout(1500)
+                        # retry if few reviews loaded
+                        if stagnant_loops >= max_stagnant_loops and current_review_count < 10:
+                            logger.warning(f"Only {current_review_count} reviews loaded, retrying scroll for {name}")
+                            stagnant_loops = 0
 
+                    page.wait_for_timeout(3000 + random.randint(0, 1500))
                     logger.info("Finished scrolling all reviews for %s", name)
                 except Exception as e:
                     logger.warning("Scrolling failed for %s: %s", name, e)
+                finally:
+                    # --- Extract reviews and close page ---
+                    html = page.content()
+                    if _is_captcha_page(html):
+                        logger.warning("CAPTCHA detected after scrolling for %s — skipping", url)
+                        results.append({"name": name, "url": url, "skipped": True, "reason": "captcha_after_scroll"})
+                        page.close()
+                        continue
 
-                html = page.content()
-                if _is_captcha_page(html):
-                    logger.warning("CAPTCHA detected after scrolling for %s — skipping", url)
-                    results.append({"name": name, "url": url, "skipped": True, "reason": "captcha_after_scroll"})
-                    continue
+                    reviews = _extract_reviews_from_html(html)
+                    logger.info("Found %d reviews (heuristic) for %s", len(reviews), name)
+                    _upsert_branch_and_reviews(name, url, reviews)
+                    results.append({"name": name, "url": url, "skipped": False, "found": len(reviews)})
 
-                reviews = _extract_reviews_from_html(html)
-                logger.info("Found %d reviews (heuristic) for %s", len(reviews), name)
-                _upsert_branch_and_reviews(name, url, reviews)
-                results.append({"name": name, "url": url, "skipped": False, "found": len(reviews)})
+                    page.close()
+                    time.sleep(3 + random.random() * 4)
 
-                time.sleep(3 + random.random() * 4)
             except PlaywrightTimeoutError as e:
                 logger.exception("Timeout while loading %s: %s", url, e)
                 results.append({"name": name, "url": url, "skipped": True, "reason": "timeout"})
