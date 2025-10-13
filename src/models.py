@@ -21,7 +21,7 @@ class Branch(Base):
 
 class Review(Base):
     __tablename__ = "reviews"
-    id = Column(Integer, primary_key=True)
+    review_id = Column(Integer, primary_key=True)
     branch_id = Column(Integer, ForeignKey("branches.id"))
     author = Column(String(256))
     rating = Column(Integer)  # 1-5

@@ -10,3 +10,6 @@ pandas
 bertopic
 sklearn
 google
+fastapi
+uvicorn
+logging
