@@ -6,7 +6,7 @@ from langdetect import detect
 from google.cloud import translate_v2 as translate
 from dotenv import load_dotenv
 import os
-
+from datetime import datetime
 
 # Load .env file
 load_dotenv()
@@ -31,7 +31,6 @@ def get_connection():
 def fetch_reviews():
     """Fetch all necessary columns from the reviews table."""
     conn = get_connection()
-    # Fetch all relevant columns:
     query = """
         SELECT 
             review_id, 
@@ -45,8 +44,8 @@ def fetch_reviews():
     """
     df = pd.read_sql_query(query, conn)
     conn.close()
-    # Rename 'review_id' column to 'id' temporarily for compatibility with original code structure
-    df.rename(columns={'review_id': 'id', 'text': 'original_text'}, inplace=True)
+    # Rename only 'text' → 'original_text'
+    df.rename(columns={'text': 'original_text'}, inplace=True)
     return df
 
 # -----------------------------
@@ -61,7 +60,6 @@ def translate_text(text, target_language="en"):
 def normalize_reviews(df):
     """Translate Arabic reviews and keep English ones as is."""
     normalized_texts = []
-    # Loop over the 'original_text' column
     for text in df["original_text"]:
         try:
             lang = detect(text)
@@ -71,10 +69,8 @@ def normalize_reviews(df):
             else:
                 normalized_texts.append(text)
         except Exception as e:
-            # Fallback to original text on error
             print(f"Error translating: {e}")
             normalized_texts.append(text)
-            
     df["normalized_text"] = normalized_texts
     return df
 
@@ -86,7 +82,6 @@ def save_normalized_reviews(df):
     conn = get_connection()
     cur = conn.cursor()
 
-    # --- UPDATED Create new table with all columns ---
     create_table_query = """
     CREATE TABLE IF NOT EXISTS normalized_reviews (
         review_id INTEGER PRIMARY KEY,
@@ -101,11 +96,9 @@ def save_normalized_reviews(df):
     """
     cur.execute(create_table_query)
     conn.commit()
-    # -----------------------------------------------
 
-    # Insert data
+    # Insert or update rows
     for _, row in df.iterrows():
-        # --- UPDATED INSERT query to include all columns ---
         cur.execute(
             """
             INSERT INTO normalized_reviews 
@@ -122,21 +115,21 @@ def save_normalized_reviews(df):
                 scraped_at = EXCLUDED.scraped_at;
             """,
             (
-                row["id"], 
-                row["branch_id"], 
-                row["author"], 
-                row["rating"], 
-                row["original_text"], # original text is now included
-                row["normalized_text"], 
-                row["review_date"], 
+                row["review_id"],
+                row["branch_id"],
+                row["author"],
+                row["rating"],
+                row["original_text"],
+                row["normalized_text"],
+                row["review_date"],
                 row["scraped_at"]
             )
         )
-        # ----------------------------------------------------
+
     conn.commit()
     cur.close()
     conn.close()
-    print("✅ Normalized reviews saved to database.")
+    print("Normalized reviews saved to database.")
 
 # -----------------------------
 # 5. Main entry point

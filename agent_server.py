@@ -42,54 +42,64 @@ def run_pipeline() -> Dict[str, Any]:
 
 def fetch_insights_from_db(limit_branches: int = 10) -> Dict[str, Any]:
     """
-    Try to fetch prepared insights from an 'insights' table if present.
-    If that table is not present, fall back to aggregating reviews per branch
-    and returning counts + a few sample reviews (per branch).
+    Fetch recent insights and metadata from insights_meta + insights tables.
+    If no data exists, fall back to aggregated reviews.
     """
+    from src.models import Insight, InsightMeta
+    from sqlalchemy.orm import joinedload
+    from sqlalchemy import func
+
     session = SessionLocal()
     try:
-        # First try: does an 'insights' table exist? (common pattern)
-        # We'll do a simple check by attempting a raw SQL select.
-        try:
-            # If you have an 'insights' table with a jsonb 'payload' column:
-            res = session.execute("SELECT id, created_at, payload FROM insights ORDER BY created_at DESC LIMIT 1;")
-            row = res.fetchone()
-            if row:
-                logger.info("Found insights row in 'insights' table, returning payload.")
-                # payload may already be JSON (jsonb) - convert if needed
-                payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
-                return {"type": "insights_table", "payload": payload}
-        except Exception:
-            # table doesn't exist or query failed -> fall back
-            pass
+        # Check if there’s any record in insights_meta
+        meta_exists = session.query(InsightMeta).count()
+        if meta_exists == 0:
+            logger.info("No rows found in insights_meta; building fallback aggregated insights from reviews.")
+            return build_fallback_from_reviews(session, limit_branches)
 
-        # Fallback aggregation: build simple insights per branch
-        logger.info("No insights table found; building fallback aggregated insights from reviews.")
-        branches = session.query(Branch).order_by(Branch.scraped_at.desc()).limit(limit_branches).all()
-        out = []
-        for b in branches:
-            # basic aggregates: total reviews, avg rating, sample top 5 reviews
-            reviews_q = session.query(Review).filter(Review.branch_id == b.id)
-            total = reviews_q.count()
-            avg_rating = None
-            try:
-                avg_rating = float(session.query(func.avg(Review.rating)).filter(Review.branch_id == b.id).scalar() or 0)
-            except Exception:
-                # import func lazily if not available
-                from sqlalchemy import func
-                avg_rating = float(session.query(func.avg(Review.rating)).filter(Review.branch_id == b.id).scalar() or 0)
+        # Get recent meta entries and join their insights
+        metas = (
+            session.query(InsightMeta)
+            .order_by(InsightMeta.analysis_date.desc())
+            .limit(limit_branches)
+            .all()
+        )
 
-            samples = reviews_q.order_by(Review.id.desc()).limit(5).all()
-            sample_list = [{"author": r.author, "rating": r.rating, "text": r.text[:500]} for r in samples]
-            out.append({
-                "branch_id": b.id,
-                "branch_name": b.name,
-                "url": b.url,
-                "total_reviews": total,
-                "avg_rating": avg_rating,
-                "sample_reviews": sample_list
+        results = []
+        for meta in metas:
+            insights = (
+                session.query(Insight)
+                .filter(Insight.meta_id == meta.meta_id)
+                .order_by(Insight.topic_id.asc())
+                .all()
+            )
+
+            insights_data = [
+                {
+                    "topic_id": i.topic_id,
+                    "percentage": float(i.percentage),
+                    "top_keywords": i.top_keywords,
+                    "aspect": i.gemini_aspect,
+                    "sentiment": i.gemini_sentiment,
+                    "summary": i.gemini_summary,
+                    "recommendation": i.gemini_recommendation,
+                }
+                for i in insights
+            ]
+
+            results.append({
+                "branch_id": meta.branch_id,
+                "branch_name": meta.branch_name,
+                "analysis_date": meta.analysis_date.isoformat(),
+                "topics": insights_data,
             })
-        return {"type": "aggregated_fallback", "branches": out}
+
+        logger.info("Returning %d insights_meta records from DB.", len(results))
+        return {"type": "insights_table", "branches": results}
+
+    except Exception as e:
+        logger.error("Error fetching insights: %s", e)
+        return build_fallback_from_reviews(session, limit_branches)
     finally:
         session.close()
 
@@ -100,10 +110,21 @@ def home():
 @app.post("/run")
 def run_and_return_insights():
     """
-    Run the pipeline, then fetch the latest insights from Postgres and return JSON.
+    Check if insights are already available in DB.
+    If yes → return them immediately.
+    If no → run the pipeline, then fetch and return results.
     """
     try:
+        # Step 1: Try fetching existing insights
+        insights = fetch_insights_from_db(limit_branches=20)
+        if insights and insights.get("type") == "insights_table":
+            logger.info("Returning cached insights from DB (no pipeline run).")
+            return {"status": "success", "insights": insights}
+
+        # Step 2: Otherwise, run pipeline and then fetch insights
+        logger.info("No cached insights found; running pipeline...")
         run_result = run_pipeline()
+
         if run_result["returncode"] != 0:
             return JSONResponse(
                 content={
@@ -112,15 +133,22 @@ def run_and_return_insights():
                     "stderr": run_result["stderr"],
                     "stdout": run_result["stdout"],
                 },
-                status_code=500
+                status_code=500,
             )
 
-        # pipeline succeeded: fetch insights from DB
+        # Step 3: Fetch new insights from DB after successful pipeline
         insights = fetch_insights_from_db(limit_branches=20)
-        return {"status": "success", "insights": insights, "pipeline_stdout": run_result["stdout"]}
+        return {
+            "status": "success",
+            "insights": insights,
+            "pipeline_stdout": run_result["stdout"],
+        }
+
     except Exception as exc:
         logger.exception("Agent error")
-        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=500)
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=500
+        )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 from sqlalchemy import Integer, String, Column, Text, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
+from sqlalchemy import Numeric, JSON, DateTime
 
 Base = declarative_base()
 
@@ -30,3 +31,33 @@ class Review(Base):
     scraped_at = Column(DateTime, default=datetime.utcnow)
 
     branch = relationship("Branch", back_populates="reviews")
+
+# =========================
+# Insights Tables
+# =========================
+
+
+class InsightMeta(Base):
+    __tablename__ = "insights_meta"
+    
+    meta_id = Column(Integer, primary_key=True)
+    branch_id = Column(Integer, nullable=False)
+    branch_name = Column(String(255), nullable=False)
+    analysis_date = Column(DateTime, default=datetime.utcnow)
+    number_of_reviews_processed = Column(Integer, nullable=False)
+    number_of_topics = Column(Integer, nullable=False)
+    bertopic_parameters = Column(JSON)
+
+
+class Insight(Base):
+    __tablename__ = "insights"
+    
+    insight_id = Column(Integer, primary_key=True)
+    meta_id = Column(Integer, ForeignKey("insights_meta.meta_id"), nullable=False)
+    topic_id = Column(Integer, nullable=False)
+    percentage = Column(Numeric(5, 2), nullable=False)
+    top_keywords = Column(Text)
+    gemini_aspect = Column(String(255))
+    gemini_sentiment = Column(String(50))
+    gemini_summary = Column(Text)
+    gemini_recommendation = Column(Text)

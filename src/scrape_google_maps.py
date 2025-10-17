@@ -4,8 +4,8 @@ import re
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs
-from .db import SessionLocal
-from .models import Branch, Review
+from src.db import SessionLocal
+from src.models import Branch, Review
 from datetime import datetime
 import os
 

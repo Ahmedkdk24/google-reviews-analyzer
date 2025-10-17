@@ -1,121 +1,234 @@
-# Google Reviews Analyzer
-
-A Python pipeline for scraping Google Maps reviews, normalizing multilingual feedback, and extracting actionable insights using topic modeling and generative AI.
+Here’s a **complete, production-ready `README.md`** for your **Google Reviews Analyzer** Streamlit app, including Cloud Run deployment instructions, local setup, and environment configuration.
 
 ---
 
-## Features
+# 🧠 Google Reviews Analyzer
 
-- **Scrape** reviews from Google Maps for multiple branches/locations.
-- **Normalize** reviews: automatically translate Arabic reviews to English.
-- **Analyze** reviews: discover topics, summarize sentiment, and generate recommendations using BERTopic and Google Gemini.
+The **Google Reviews Analyzer** is a Streamlit-based dashboard for scraping, normalizing, analyzing, and visualizing Google Maps reviews for multiple business branches.
+
+It automatically:
+
+* Scrapes reviews from Google Maps using Playwright.
+* Normalizes and translate non-English reviews to English.
+* Performs topic modeling (via BERTopic).
+* Generates insights and summaries using Gemini (optional).
+* Stores results in a PostgreSQL database for persistent access and visualization.
 
 ---
 
-## Setup
+## 🚀 Features
 
-### 1. Clone the repository
+* **Scrape Reviews** — Extract reviews from Google Maps branch URLs.
+* **Normalize Text** — Translates and standardize review text for analysis.
+* **Topic Modeling** — Identify recurring topics in customer feedback using BERTopic.
+* **Gemini Summaries** *(optional)* — Generate AI-powered summaries, sentiments, and recommendations.
+* **Database Integration** — Save raw reviews, normalized reviews, and insights to PostgreSQL.
+* **Streamlit Dashboard** — Interactive, data-rich web interface for managing branches and insights.
+
+---
+
+## 🧩 Project Structure
+
+```
+project-root/
+│
+├── streamlit_app.py               # Main Streamlit dashboard
+├── src/
+│   ├── run_scraper.py             # Playwright-based scraper
+│   ├── db.py                      # Database connection (SQLAlchemy)
+│   ├── models.py                  # SQLAlchemy ORM models (Branch, Review, etc.)
+│   ├── reviews_normalization.py   # Text normalization logic
+│   ├── reviews_insight_pipeline.py# Topic modeling + Gemini pipeline
+│   └── ...
+├── requirements.txt
+├── Dockerfile
+└── README.md
+```
+
+---
+
+## ⚙️ Local Setup
+
+### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/google-reviews-analyzer.git
+git clone https://github.com/<your-username>/google-reviews-analyzer.git
 cd google-reviews-analyzer
 ```
 
-### 2. Install dependencies
+### 2. Create and Activate Virtual Environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Environment variables
+### 4. Set Environment Variables
 
-Create a `.env` file in the root directory with the following keys:
-
-```
-DATABASE_URL=postgresql+psycopg2://postgres:admin@localhost:5432/gymagent
-GOOGLE_GEMINI_API_KEY=your-gemini-api-key
-USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64)
-BRANCHES_JSON=branches.json
-```
-
-For Google Cloud Translation, set up your service account and download the credentials JSON file.  
-Set the path in your `.env` or ensure this line is present in `reviews_normalization.py`:
-
-```
-GOOGLE_APPLICATION_CREDENTIALS=reviews-analyzer-service-account-key.json
-```
-
----
-
-## Usage
-
-### 1. Prepare your branches list
-
-Create a `branches.json` file containing a list of branches to scrape, e.g.:
-
-```json
-[
-  {"name": "Gym Nation Kuwait", "url": "https://maps.google.com/maps/place/xyz"},
-  {"name": "Another Branch", "url": "https://maps.google.com/maps/place/abc"}
-]
-```
-
-### 2. Run the full pipeline
-
-You can run the entire process (scraping, normalization, insight extraction) with one command:
+Create a `.env` file in your project root:
 
 ```bash
-python src/main_pipeline.py
+DATABASE_URL=postgresql+psycopg2://<user>:<password>@<host>:<port>/<database>
+MAX_REVIEWS_PER_BRANCH=50
+PLAYWRIGHT_HEADLESS=true
+GOOGLE_GEMINI_API_KEY=<your-gemini-api-key>  # optional
 ```
 
-Or run each step individually:
+Then load them:
 
-- **Scrape reviews:**  
-  `python src/run_scraper.py`
-
-- **Normalize reviews:**  
-  `python src/reviews_normalization.py`
-
-- **Extract insights:**  
-  `python src/reviews_insight_pipeline.py`
-
----
-
-## Output
-
-- Reviews and insights are stored in your PostgreSQL database.
-- Summaries and recommendations are printed to the console.
-
----
-
-## Project Structure
-
-```
-src/
-  ├── db.py
-  ├── models.py
-  ├── scrape_reviews.py
-  ├── run_scraper.py
-  ├── reviews_normalization.py
-  ├── reviews_insight_pipeline.py
-  ├── utils.py
-  └── main_pipeline.py
-requirements.txt
-branches.json
-.env
+```bash
+export $(cat .env | xargs)
 ```
 
+### 5. Initialize Playwright (for scraping)
+
+```bash
+playwright install
+```
+
+### 6. Run the App Locally
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Open your browser to [http://localhost:8501](http://localhost:8501).
+
 ---
 
-## Notes
+## 🐳 Deploying to Google Cloud Run
 
-- Requires Python 3.8+.
-- Make sure Playwright browsers are installed:  
-  `playwright install`
-- Google Gemini and Google Cloud Translation require API keys/service account credentials.
+Cloud Run allows you to deploy this Streamlit app as a fully managed container.
+
+### 1. Enable Required Services
+
+```bash
+gcloud services enable run.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com
+```
+
+### 2. Build the Docker Image
+
+Create a `Dockerfile` (if not already present):
+
+```Dockerfile
+# Dockerfile
+FROM python:3.10-slim
+
+# Set workdir
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y git curl chromium chromium-driver
+
+# Copy and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the app
+COPY . .
+
+# Streamlit configuration
+ENV PORT=8080
+EXPOSE 8080
+
+# Streamlit runs on port 8080 for Cloud Run
+CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8080", "--server.address=0.0.0.0"]
+```
+
+Then build and push to Artifact Registry (replace `<REGION>` and `<PROJECT_ID>`):
+
+```bash
+gcloud builds submit --tag <REGION>-docker.pkg.dev/<PROJECT_ID>/reviews-analyzer/app
+```
+
+### 3. Deploy to Cloud Run
+
+```bash
+gcloud run deploy google-reviews-analyzer \
+  --image <REGION>-docker.pkg.dev/<PROJECT_ID>/reviews-analyzer/app \
+  --platform managed \
+  --region <REGION> \
+  --allow-unauthenticated \
+  --set-env-vars DATABASE_URL=$DATABASE_URL,MAX_REVIEWS_PER_BRANCH=50,PLAYWRIGHT_HEADLESS=true,GOOGLE_GEMINI_API_KEY=$GOOGLE_GEMINI_API_KEY
+```
+
+After deployment, Cloud Run will output a public URL like:
+
+```
+Service [google-reviews-analyzer] deployed to:
+https://google-reviews-analyzer-<region>-a.run.app
+```
+
+Visit that URL to access your dashboard.
 
 ---
 
-## License
+## 🧠 Environment Variables Summary
 
-MIT License
+| Variable                 | Description                                | Required    |
+| ------------------------ | ------------------------------------------ | ----------- |
+| `DATABASE_URL`           | SQLAlchemy-compatible Postgres URL         | ✅           |
+| `MAX_REVIEWS_PER_BRANCH` | Max reviews to fetch per branch            | ✅           |
+| `PLAYWRIGHT_HEADLESS`    | Run browser in headless mode               | ✅           |
+| `GOOGLE_GEMINI_API_KEY`  | API key for Gemini (if using AI summaries) | ⚙️ Optional |
+
+---
+
+## 🧱 Database Schema (Simplified)
+
+| Table                | Purpose                                    |
+| -------------------- | ------------------------------------------ |
+| `branches`           | Stores branch name, URL, and metadata      |
+| `reviews`            | Stores individual scraped reviews          |
+| `normalized_reviews` | Cleaned and processed text data            |
+| `insights`           | Topic modeling and Gemini analysis results |
+| `insights_meta`      | Metadata linking topics to branches        |
+
+---
+
+## 🧪 Troubleshooting
+
+| Issue                          | Possible Fix                                            |
+| ------------------------------ | ------------------------------------------------------- |
+| **Playwright errors**          | Run `playwright install chromium`                       |
+| **Database connection errors** | Verify `DATABASE_URL` is reachable from Cloud Run       |
+| **Gemini API key missing**     | Set `GOOGLE_GEMINI_API_KEY` in environment              |
+| **Scraper stuck**              | Ensure `PLAYWRIGHT_HEADLESS=true` and valid URLs        |
+| **No insights showing**        | Check if `ensure_tables_exist()` ran and DB has entries |
+
+---
+
+## 🧰 Useful Commands
+
+```bash
+# Run app locally
+streamlit run streamlit_app.py
+
+# Rebuild Docker image
+gcloud builds submit --tag gcr.io/<PROJECT_ID>/reviews-analyzer
+
+# Update Cloud Run service
+gcloud run deploy google-reviews-analyzer --image gcr.io/<PROJECT_ID>/reviews-analyzer
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 💡 Author
+
+**Google Reviews Analyzer**
+Developed by Ahmed Hamza
+

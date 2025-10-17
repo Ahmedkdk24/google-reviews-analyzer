@@ -10,12 +10,12 @@ import re
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-from .db import SessionLocal
-from .models import Branch, Review
+from src.db import SessionLocal
+from src.models import Branch, Review
 
 # Config via env
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-MAX_REVIEWS_PER_BRANCH = int(os.getenv("MAX_REVIEWS_PER_BRANCH", "50"))
+MAX_REVIEWS_PER_BRANCH = int(os.getenv("MAX_REVIEWS_PER_BRANCH", "10"))
 HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() in ("1", "true", "yes")
 PLAYWRIGHT_PROXY = os.getenv("PLAYWRIGHT_PROXY")  # optional, format: "http://user:pass@host:port"
 BRANCHES_JSON = os.getenv("BRANCHES_JSON", "branches.json")
@@ -41,70 +41,104 @@ def _is_captcha_page(html):
 
 def _extract_reviews_from_html(html):
     """
-    Improved extraction for Google Maps review blocks using updated selectors.
-    Returns list of dicts: {author, rating, text, review_date}
+    Extract reviews (author, rating, text, date) from a Google Maps place page.
+    Handles current DOM structure as of 2025, including <span class="xRkPPb"> date format.
     """
-    # Helper function parse_rating_from_text remains the same
+    from bs4 import BeautifulSoup
+    import re
+    from datetime import datetime, timedelta
+
+    # --- Helper: parse numeric rating from aria-label text ---
     def parse_rating_from_text(s):
-        # ... (keep your existing parse_rating_from_text logic here) ...
         if not s:
             return None
-        import re # Keep this here since re is needed
         arabic_map = {'٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9'}
         norm = ''.join(arabic_map.get(ch, ch) for ch in s)
-        m = re.search(r"Rated\s*[:\-]?\s*([0-9])", norm)
-        if m:
-            try: return int(m.group(1))
-            except ValueError: return None
-        m = re.search(r"([0-9])\s*out\s*of\s*[0-9]", norm)
-        if m:
-            try: return int(m.group(1))
-            except ValueError: return None
-        m = re.search(r"\b([0-9])(\.0)?\b", norm)
-        if m:
-            try: return int(m.group(1))
-            except ValueError: return None
-        return None
-    # End of helper function
+        m = re.search(r"([0-9])(\.0)?\b", norm)
+        return int(m.group(1)) if m else None
 
+    # --- Helper: parse relative date like "2 weeks ago" or "قبل شهرين" ---
+    def parse_relative_date(text):
+        if not text:
+            return ""
+        text = text.strip().lower()
+        now = datetime.utcnow()
+
+        # Remove trailing source info like "on Tripadvisor"
+        text = re.sub(r"\s+on\s+.*$", "", text).strip()
+
+        # English relative times
+        patterns = [
+            (r"(\d+)\s+day", "day"),
+            (r"(\d+)\s+week", "week"),
+            (r"(\d+)\s+month", "month"),
+            (r"(\d+)\s+year", "year"),
+        ]
+        for pattern, unit in patterns:
+            m = re.search(pattern, text)
+            if m:
+                num = int(m.group(1))
+                if unit == "day":
+                    return (now - timedelta(days=num)).strftime("%Y-%m-%d")
+                elif unit == "week":
+                    return (now - timedelta(weeks=num)).strftime("%Y-%m-%d")
+                elif unit == "month":
+                    return (now - timedelta(days=30*num)).strftime("%Y-%m-%d")
+                elif unit == "year":
+                    return (now - timedelta(days=365*num)).strftime("%Y-%m-%d")
+
+        # Arabic equivalents
+        arabic_patterns = [
+            (r"قبل\s+(\d+)\s*يوم", "day"),
+            (r"قبل\s+(\d+)\s*أسبوع", "week"),
+            (r"قبل\s+(\d+)\s*شهر", "month"),
+            (r"قبل\s+(\d+)\s*سنة", "year"),
+        ]
+        for pattern, unit in arabic_patterns:
+            m = re.search(pattern, text)
+            if m:
+                num = int(m.group(1))
+                if unit == "day":
+                    return (now - timedelta(days=num)).strftime("%Y-%m-%d")
+                elif unit == "week":
+                    return (now - timedelta(weeks=num)).strftime("%Y-%m-%d")
+                elif unit == "month":
+                    return (now - timedelta(days=30*num)).strftime("%Y-%m-%d")
+                elif unit == "year":
+                    return (now - timedelta(days=365*num)).strftime("%Y-%m-%d")
+
+        # fallback: return raw string (absolute dates like "January 2024" or "2023")
+        return text
+
+    # --- Main Extraction ---
     soup = BeautifulSoup(html, "html.parser")
     reviews = []
-
-    # PRIMARY FIX: Use the data-review-id attribute for the main block
-    blocks = soup.find_all("div", attrs={"data-review-id": True})
-
     seen_texts = set()
+
+    blocks = soup.find_all("div", attrs={"data-review-id": True})
     for b in blocks:
         try:
-            # --- FIX 1: Author Extraction ---
-            author = "Unknown"
+            # Author
             author_tag = b.find("div", class_="d4r55 fontTitleMedium")
-            if author_tag:
-                author = author_tag.get_text(strip=True)
+            author = author_tag.get_text(strip=True) if author_tag else "Unknown"
 
-            # --- FIX 2: Rating Extraction ---
-            rating = None
-            # The rating is in a span with role="img" and an aria-label
+            # Rating
             rating_tag = b.find("span", role="img")
-            if rating_tag:
-                rating = parse_rating_from_text(rating_tag.get("aria-label"))
+            rating = parse_rating_from_text(rating_tag.get("aria-label") if rating_tag else "")
 
-            # --- Text Extraction (can be simplified/retained as is) ---
-            # Targeting the text container: div.MyEned
+            # Review text
             text_container = b.find("div", class_="MyEned")
-            if text_container:
-                 text = text_container.get_text(separator=" ", strip=True)
-            else:
-                 # Fallback (your original heuristic)
-                 text = b.get_text(separator=" ", strip=True) or ""
-
-
-            # ignore very short or empty texts
-            if not text or len(text) < 10:
+            review_text = text_container.get_text(separator=" ", strip=True) if text_container else ""
+            if not review_text or len(review_text) < 10:
                 continue
 
-            # dedupe by snippet
-            snippet = text[:160]
+            # ✅ Extract review date from <span class="xRkPPb">
+            date_tag = b.find("span", class_="xRkPPb")
+            review_date_raw = date_tag.get_text(separator=" ", strip=True) if date_tag else ""
+            review_date = parse_relative_date(review_date_raw)
+
+            # Deduplicate by text snippet
+            snippet = review_text[:160]
             if snippet in seen_texts:
                 continue
             seen_texts.add(snippet)
@@ -112,14 +146,14 @@ def _extract_reviews_from_html(html):
             reviews.append({
                 "author": author,
                 "rating": rating or 0,
-                "text": text,
-                "review_date": ""  # Still requires separate date extraction logic
+                "text": review_text,
+                "review_date": review_date
             })
 
             if len(reviews) >= MAX_REVIEWS_PER_BRANCH:
                 break
+
         except Exception:
-            # avoid full failure when a single block is weird
             continue
 
     return reviews
@@ -135,15 +169,25 @@ def _upsert_branch_and_reviews(place_name, place_url, reviews):
             branch.name = place_name or branch.name
             branch.scraped_at = datetime.utcnow()
         else:
-            branch = Branch(name=place_name or place_url, url=place_url, place_id=place_url, scraped_at=datetime.utcnow())
+            branch = Branch(
+                name=place_name or place_url,
+                url=place_url,
+                place_id=place_url,
+                scraped_at=datetime.utcnow()
+            )
             session.add(branch)
             session.flush()
 
         for r in reviews:
-            # naive duplicate detection by review text
-            already = session.query(Review).filter(Review.branch_id == branch.id, Review.text == r["text"]).first()
+            # Use branch.id normally, Review now uses review_id as PK
+            already = session.query(Review).filter(
+                Review.branch_id == branch.id,
+                Review.text == r["text"]
+            ).first()
+
             if already:
                 continue
+
             review = Review(
                 branch_id=branch.id,
                 author=r.get("author"),
@@ -283,6 +327,11 @@ def scrape_reviews_from_place_urls(place_list):
                     previous_height = 0
                     stagnant_loops = 0
                     max_stagnant_loops = 15  # allow more scroll cycles for slow loading
+                    max_total_attempts = 5    # NEW: max number of scroll retries
+                    total_attempts = 0        # counter
+
+                    timeout_seconds = 60      # NEW: total timeout per branch
+                    start_time = time.time()
 
                     review_selector = 'div[data-review-id]'
                     scroll_script = """
@@ -296,11 +345,17 @@ def scrape_reviews_from_place_urls(place_list):
                         }
                     """
 
-                    while stagnant_loops < max_stagnant_loops:
+                    while stagnant_loops < max_stagnant_loops and total_attempts < max_total_attempts:
                         current_review_count = page.evaluate(f'document.querySelectorAll("{review_selector}").length')
 
+                        # Stop if target reached
                         if current_review_count >= MAX_REVIEWS_PER_BRANCH:
                             logger.info(f"Loaded {current_review_count} reviews (target {MAX_REVIEWS_PER_BRANCH}) for {name}. Stopping scroll.")
+                            break
+
+                        # Stop if timeout reached
+                        if time.time() - start_time > timeout_seconds:
+                            logger.warning(f"Timeout reached for {name}, stopping scroll at {current_review_count} reviews.")
                             break
 
                         # Scroll the container
@@ -339,6 +394,7 @@ def scrape_reviews_from_place_urls(place_list):
 
                         if current_height == previous_height:
                             stagnant_loops += 1
+                            total_attempts += 1  # increment retry counter
                         else:
                             stagnant_loops = 0
                             previous_height = current_height
@@ -350,8 +406,10 @@ def scrape_reviews_from_place_urls(place_list):
 
                     page.wait_for_timeout(3000 + random.randint(0, 1500))
                     logger.info("Finished scrolling all reviews for %s", name)
+
                 except Exception as e:
                     logger.warning("Scrolling failed for %s: %s", name, e)
+
                 finally:
                     # --- Extract reviews and close page ---
                     html = page.content()

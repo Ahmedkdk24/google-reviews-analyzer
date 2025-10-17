@@ -1,5 +1,5 @@
 # reviews_insight_pipeline.py
-
+import sys
 import os
 import json
 import pandas as pd
@@ -10,6 +10,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 from datetime import datetime
 from typing import List, Dict # Added for type hints
 
+sys.stdout.reconfigure(encoding='utf-8')
 # Assume database objects are accessible from project root structure
 try:
     from src.db import SessionLocal
@@ -66,7 +67,7 @@ def ensure_tables_exist():
         cur.execute(meta_table_creation)
         cur.execute(insights_table_creation)
         conn.commit()
-        print("✅ Insights tables confirmed/created.")
+        print("Insights tables confirmed/created.")
     except Exception as e:
         print(f"FATAL ERROR during table creation: {e}")
         conn.rollback()

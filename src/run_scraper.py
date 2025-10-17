@@ -1,16 +1,12 @@
 # src/run_scraper.py
-from .utils import init_db
-from .scrape_reviews import load_branches_from_json, scrape_reviews_from_place_urls
-import os
-
-def main():
-    init_db()
-    path = os.getenv("BRANCHES_JSON", "branches.json")
-    branches = load_branches_from_json(path)
-    results = scrape_reviews_from_place_urls(branches)
-    print("Done. Summary:")
-    for r in results:
-        print(r)
+import sys, json
+from src.scrape_reviews import scrape_reviews_from_place_urls
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        with open(sys.argv[1], "r", encoding="utf-8") as f:
+            branches_input = json.load(f)
+    else:
+        branches_input = []
+
+    scrape_reviews_from_place_urls(branches_input)
