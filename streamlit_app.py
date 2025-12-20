@@ -72,11 +72,11 @@ max_reviews = st.sidebar.number_input(
     value=int(os.getenv("MAX_REVIEWS_PER_BRANCH", "50")),
 )
 headless = st.sidebar.checkbox(
-    "Run Playwright headless",
+    "Scrape Reviews",
     value=os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() in ("1", "true", "yes"),
 )
-run_bertopic = st.sidebar.checkbox("Run BERTopic modeling (may be slow)", value=True)
-run_gemini = st.sidebar.checkbox("Use Gemini summaries (requires GOOGLE_GEMINI_API_KEY)", value=False)
+run_bertopic = st.sidebar.checkbox("Topic Modelling", value=True)
+run_gemini = st.sidebar.checkbox("Extract insights and provide recommendations", value=False)
 
 st.sidebar.markdown("---")
 st.sidebar.write("Environment variables used: MAX_REVIEWS_PER_BRANCH, PLAYWRIGHT_HEADLESS, GOOGLE_GEMINI_API_KEY")

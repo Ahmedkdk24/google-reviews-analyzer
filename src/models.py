@@ -9,13 +9,13 @@ Base = declarative_base()
 class Branch(Base):
     __tablename__ = "branches"
     id = Column(Integer, primary_key=True)
-    name = Column(String(256), nullable=False)
+    name = Column(String(512), nullable=False)  # Consider increasing name, too
     address = Column(String(512))
-    place_id = Column(String(256), unique=True, index=True)  # unique identifier if available
+    place_id = Column(String(1024), unique=True, index=True) # <<< INCREASE THIS from 256
     phone = Column(String(64))
     lat = Column(String(64))
     lng = Column(String(64))
-    url = Column(String(1024))
+    url = Column(String(1024)) # This is already 1024, but ensure it's correct
     scraped_at = Column(DateTime, default=datetime.utcnow)
 
     reviews = relationship("Review", back_populates="branch", cascade="all, delete-orphan")
