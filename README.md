@@ -1,7 +1,3 @@
-Here’s a **complete, production-ready `README.md`** for your **Google Reviews Analyzer** Streamlit app, including Cloud Run deployment instructions, local setup, and environment configuration.
-
----
-
 # 🧠 Google Reviews Analyzer
 
 The **Google Reviews Analyzer** is a Streamlit-based dashboard for scraping, normalizing, analyzing, and visualizing Google Maps reviews for multiple business branches.
